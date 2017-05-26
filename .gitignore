@@ -1,0 +1,4 @@
+# Cython compilation files
+*.o
+*.cpp
+*.so
