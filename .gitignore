@@ -2,3 +2,10 @@
 *.o
 *.cpp
 *.so
+shcl/__pycache__/*
+SHCL.egg-info
+
+# Joblib
+examples/joblib_cache/*
+
+

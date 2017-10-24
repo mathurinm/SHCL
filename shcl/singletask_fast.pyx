@@ -41,7 +41,7 @@ cdef double abs_max(int n, double * a) nogil:
 
 def solver(double[::1, :] X,
            double[:] y,
-           double[:] beta,
+           double[:] beta_init,
            double alpha,
            int[:] block_indices,
            double[:] sigma_mins,
@@ -51,14 +51,15 @@ def solver(double[::1, :] X,
            int f_gap=10,
            int verbose=1):
     """
-        WARNING: beta is modified by this function
-
-        Solves the Smooth Block Homosecedastic Concomitant Lasso.
-        Restricted to the diagonal covariance case for now.
+        Solves the Smooth Block Homosecedastic Concomitant Lasso. (n_tasks=1)
     """
     cdef int n_samples = X.shape[0]
     cdef int n_features = X.shape[1]
     cdef int n_sigmas = len(block_indices) - 1
+
+    cdef int inc = 1
+    cdef double[:] beta = np.empty(n_features)
+    dcopy(&n_features, &beta_init[0], &inc, &beta[0], &inc)
 
     cdef int j
     cdef int k
@@ -68,7 +69,6 @@ def solver(double[::1, :] X,
     cdef double ST_const
     cdef double grad
     cdef int t
-    cdef int inc = 1
     cdef double tmp
     cdef double beta_j_old
     cdef double p_obj
