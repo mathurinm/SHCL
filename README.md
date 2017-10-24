@@ -4,8 +4,9 @@ This repository hosts the implementation of solvers for multi-task Generalized C
 
 The algorithms are in ```./shcl/*_fast.pyx```.
 Currently implemented are:
-* multi-task Generalized Concomitant Lasso
-* multi-task Block Homoscedastic Concomitant Lasso
+* multi-task Generalized Concomitant Lasso (```multitask_generalized_solver()```)
+* multi-task Block Homoscedastic Concomitant Lasso (```multitask_blockhomo_solver()```)
+* Block Homoscedastic Concomitant Lasso (one task)
 
 For optimal time performance, the algorithms are written in Cython, using calls to BLAS/LAPACK when possible.
 
