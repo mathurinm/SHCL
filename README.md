@@ -21,6 +21,13 @@ $source activate shcl-env
 $pip install --no-deps -e .
 ```
 
+# Examples
+Once you have created the conda environment with the previous command, you can run the examples with:
+```
+$source activate shcl-env
+$ipython -i examples/blockhomo_example.py
+```
+
 # Dependencies
 All dependencies are in  ```./environment.yml```
 
