@@ -31,18 +31,23 @@ cpdef my_eigh(double[::1, :] A, double[:] eigvals, int n_samples,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef BST(double * vect, int vect_len, double level, double[:] zeros_like_vect):
+cdef BST(double * x, int x_len, double tau, double[:] zeros_like_x):
+    """
+    Block soft-thresholding of vector x at level tau, performed inplace.
+    Math formula: BST(x, tau) = x * max(0., 1 - tau/||x||_2)
+    """
     cdef int inc = 1
-    cdef double vect_norm = dnrm2(&vect_len, vect, &inc)
-    if vect_norm == 0.:
-        dcopy(&vect_len, &zeros_like_vect[0], &inc, vect, &inc)
+    cdef double x_norm = dnrm2(&x_len, x, &inc)
+    if x_norm == 0.:
+        # fill x with 0 with BLAS routine rather than for loop:
+        dcopy(&x_len, &zeros_like_x[0], &inc, x, &inc)
         return
 
-    cdef double shrink = 1. - level / vect_norm
+    cdef double shrink = 1. - tau / x_norm
     if shrink <= 0.:
-        dcopy(&vect_len, &zeros_like_vect[0], &inc, vect, &inc)
+        dcopy(&x_len, &zeros_like_x[0], &inc, x, &inc)
     else:
-        dscal(&vect_len, &shrink, vect, &inc)
+        dscal(&x_len, &shrink, x, &inc)
 
 
 @cython.cdivision(True)
@@ -51,6 +56,41 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
                             double[:, ::1] Beta_init, double tol=1e-4,
                             long max_iter=10**5, int f_Sigma_update=10,
                             double sigma_min=1e-3, verbose=1):
+    """Solve the optimization problem of the multi-task Generalized Smoothed
+    Concomitant Lasso with alternate minimization.
+    We minimise in Beta and Sigma:
+    (1/(2 n_samples n_tasks) trace((Y - X Beta).T Sigma^-1 (Y - X Beta)) +
+    trace(Sigma) / (2 n_samples) + alpha sum(norm(Beta, ord=2, axis=1))
+
+    Parameters:
+    -----------
+        X : Fortran ndarray, shape (n_samples, n_features)
+            Training data.
+        Y : Fortran ndarray, shape (n_samples, n_tasks)
+            Target values.
+        alpha : float
+            Regularization parameter.
+        Beta_init : ndarray, shape (n_features, n_tasks)
+            Initialization of the regression coefficients.
+        tol : float
+            The solver stops when reaching a duality gap lower than tol.
+        max_iter : int
+            If the duality gap does go below tol after max_iter epochs of
+            coordinate descent, the solver stops.
+        f_Sigma_update : int
+            Number of coordinate descent epochs between updates of Sigma.
+        sigma_min : float
+            Lower constraint on the eigenvalues of Sigma.
+        verbose : {0, 1}
+            Level of verbosity.
+
+    Returns:
+    --------
+        Beta : ndarray, shape (n_features, n_tasks)
+            Estimated regression coefficients after optimization.
+        Sigma : ndarray, shape (n_samples, n_samples)
+            Estimated square root of noise covariance after optimization.
+    """
     cdef int n_samples = X.shape[0]
     cdef int n_features = X.shape[1]
     cdef int n_tasks = Y.shape[1]
@@ -61,8 +101,8 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
     cdef int j
     cdef int inc = 1
     cdef double zero = 0.
-    cdef double one = 1.
-    cdef double minus_one = - 1.
+    cdef double one = 1.  # to pass to cblas
+    cdef double minus_one = - 1.  # for cblas
     cdef int tmpint
     cdef double tmpdouble
     cdef double dual_norm_XtTheta
@@ -71,14 +111,13 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
     cdef char trans_t = 't'
 
     # Lapack magic
-    cdef char V_char = 'V'
-    cdef char U_char = 'U'
     cdef int LWORK = 3 * n_samples - 1
     cdef double[:] WORK = np.empty(LWORK)
 
     # matrix we will use to store the eigevectors of ZZtop
     cdef double[::1, :] U = np.empty([n_samples, n_samples], order='F')
 
+    # Lispchitz constants of features
     cdef double[:] L_const = np.empty(n_features)
     cdef double[:] zeros_like_Beta_j = np.zeros(n_tasks)
     # TODO monitor Energies as list
@@ -276,6 +315,46 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                             long max_iter=10**5,
                             int f_Sigma_update=10,
                             double sigma_min=1e-3, verbose=1):
+    """Solve the optimization problem of the multi-task BLock Homoscedastic
+    Smoothed Concomitant Lasso with alternate minimization.
+    We minimise in Beta and Sigma:
+    (1/(2 n_samples n_tasks) trace((Y - X Beta).T Sigma^-1 (Y - X Beta)) +
+    trace(Sigma) / (2 n_samples) + alpha sum(norm(Beta, ord=2, axis=1))
+
+    with the constraints that Sigma is diagonal, constant over blocks.
+
+    Parameters:
+    -----------
+        X : Fortran ndarray, shape (n_samples, n_features)
+            Training data.
+        Y : Fortran ndarray, shape (n_samples, n_tasks)
+            Target values.
+        alpha : float
+            Regularization parameter.
+        Beta_init : ndarray, shape (n_features, n_tasks)
+            Initialization of the regression coefficients.
+        block_indices : ndarray, shape (n_blocks + 1,)
+            The k-th block starts at sample block_indices[k] and stop at
+            sample block_indices[k + 1] - 1.
+        tol : float
+            The solver stops when reaching a duality gap lower than tol.
+        max_iter : int
+            If the duality gap does go below tol after max_iter epochs of
+            coordinate descent, the solver stops.
+        f_Sigma_update : int
+            Number of coordinate descent epochs between updates of noise levels.
+        sigma_min : float
+            Lower constraint on the noise levels per block.
+        verbose : {0, 1}
+            Level of verbosity.
+
+    Returns:
+    --------
+        Beta : ndarray, shape (n_features, n_tasks)
+            Estimated regression coefficients after optimization.
+        sigma_invs : ndarray, shape (n_blocks)
+            Inverses of estimated noise levels per block after optimization.
+    """
     cdef int n_samples = X.shape[0]
     cdef int n_features = X.shape[1]
     cdef int n_tasks = Y.shape[1]
@@ -465,11 +544,10 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             for t in range(n_tasks):
                 Beta[j, t] = ddot(&n_samples, &X[0, j], &inc,
                                   &Sigma_inv_R[0, t], &inc) / L_const[j]
-            # np.testing.assert_allclose(np.array(Beta[j, :]),
-                                    #    np.dot(X[:, j], Sigma_inv_R) / L_const[j])
-            tmpdouble = alpha * n_samples * n_tasks / L_const[j]
+
 
             # in place soft thresholding
+            tmpdouble = alpha * n_samples * n_tasks / L_const[j]
             BST(&Beta[j, 0], n_tasks, tmpdouble, zeros_like_Beta_j)
 
             # WARNING this is probably error prone
@@ -480,8 +558,5 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                          &inc, &Beta[j, 0], &inc, &Sigma_inv_R[0, 0],
                          &n_samples)
                     break
-
-            # np.testing.assert_allclose(np.array(Sigma_inv_R),
-            #     np.dot(Sigma_inv, Y - np.dot(X, Beta)))
 
     return np.array(Beta), np.array(sigmas_inv)
