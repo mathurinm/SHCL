@@ -43,22 +43,26 @@ def compute_alpha_max_generalized(X, Y, sigma_min):
 
     mus = np.maximum(np.sqrt(lambdas), sigma_min)
     Sigma_max_inv = np.dot(U, 1. / mus[:, None] * U.T)
-    return norm_l2inf(np.dot(X.T, np.dot(Sigma_max_inv, Y))) / (n_samples * n_tasks)
+    return norm_l2inf(np.dot(X.T, np.dot(Sigma_max_inv, Y))
+                      ) / (n_samples * n_tasks)
 
 
-def compute_alpha_max_blockhomo(X, Y, sigma_min, block_indices):
+def compute_alpha_max_blockhomo(X, Y, sigma_min, block_indices, n_orient=1):
     n_samples, n_tasks = Y.shape
+    n_groups = X.shape[1] // n_orient
     block_sizes = np.diff(block_indices)
     n_blocks = len(block_sizes)
 
     sigmas_max = np.zeros(n_blocks)
     for k in range(n_blocks):
         block = slice(block_indices[k], block_indices[k + 1])
-        sigmas_max[k] = norm(Y[block, :], ord='fro') / np.sqrt((n_tasks * block_sizes[k]))
+        sigmas_max[k] = norm(Y[block, :], ord='fro') / \
+            np.sqrt((n_tasks * block_sizes[k]))
 
     sigmas_max = np.maximum(sigmas_max, sigma_min)
     Sigma_max_inv = np.diag(1. / np.repeat(sigmas_max, block_sizes))
-    return norm_l2inf(np.dot(X.T, np.dot(Sigma_max_inv, Y))) / (n_samples * n_tasks)
+    return norm_l2inf(np.dot(X.T, np.dot(Sigma_max_inv, Y)).reshape(
+        n_groups, -1)) / (n_samples * n_tasks)
 
 
 def TP_FP_FN(true_support, support_hat):

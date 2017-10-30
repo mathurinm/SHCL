@@ -12,18 +12,31 @@ cdef inline double fmax(double x, double y) nogil:
 
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cpdef my_eigh(double[::1, :] A, double[:] eigvals, int n_samples,
+cpdef my_eigh(double[::1, :] A, double[:] eigvals, int A_dim,
               double[:] WORK):
-    """Compute the eigen value decomposition of the Hermitian matrix A.
-       BOTH A and eigvals are modified inplace: A will store the eigenvectors"""
+    """Compute the eigen value decomposition of the Hermitian matrix A inplace.
+
+    Parameters:
+    -----------
+        A : Fortran ndarray, shape (A_dim, A_dim)
+            Matrix to perform EVD on. Is overwritten to contain eigvecs on
+            output.
+        eigvals : ndarray, shape (A_dim,)
+            Array which will contains A's eigvenvalues.
+        A_dim : int
+            A's first and second dimension.
+        WORK : ndarray, shape (3 * A_dim - 1,)
+            Array passed as memory buffer for the LAPACK routines. (these
+            routines do not allocate memory themselves)
+    """
 
     cdef char U_char = 'U'
     cdef char V_char = 'V'
-    cdef int INFO  # TODO
+    cdef int INFO  # not used but need by dsyev
 
     # WORK is an array of length LWORK, used as memory space by LAPACK
-    cdef int LWORK = 3 * n_samples - 1
-    dsyev(&V_char, &U_char, &n_samples, &A[0, 0], &n_samples, &eigvals[0],
+    cdef int LWORK = 3 * A_dim - 1
+    dsyev(&V_char, &U_char, &A_dim, &A[0, 0], &A_dim, &eigvals[0],
           &WORK[0], &LWORK,
           &INFO)
 
@@ -31,31 +44,80 @@ cpdef my_eigh(double[::1, :] A, double[:] eigvals, int n_samples,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef BST(double * x, int x_len, double tau, double[:] zeros_like_x):
+cdef double spectral_norm_group(double[::1, :] X, double[::1, :] Sigma_inv_X,
+                                int g, double[::1, :] XgSigma_invXg,
+                                double[:] L_const_eigvals,
+                                double[:] L_const_WORK, int n_orient):
+    """Compute spectral norm of the j-th group of features.
+
+    Parameters:
+    -----------
+        X : Fortran ndarray, shape (n_samples, n_features)
+            Design matrix.
+        Sigma_inv_X : Fortran ndarray, shape (n_samples, n_features)
+            Inverse of sqrt noise covariance matrix times design matrix.
+        g : int
+            Group index.
+        XgSigma_invXg : ndarray, shape (n_orient, n_orient)
+            Placeholder array.
+        L_const_eigvals : ndarray, shape (n_orient,)
+            Placeholder array to contain the eigenvalues of XgSigma_invXg.
+        n_orient : int
+            Number of orientation. If it is 1, using this function is overkill.
+        L_const_WORK : ndarray, shape (3 * n_orient - 1)
+            Memory buffer for LAPACK.
+
+    Returns:
+        The spectral norm of XgSigma_invXg.
+    """
+    cdef int i, k
+    cdef int n_samples = X.shape[0]
+    cdef int inc = 1
+    for i in range(n_orient):
+        for k in range(n_orient):
+            XgSigma_invXg[i, k] = ddot(&n_samples, &X[0, g + i], &inc,
+                                       &Sigma_inv_X[0, g + k], &inc)
+            # if k != i:
+            #     XgSigma_invXg[k, i] = XgSigma_invXg[i, k]
+
+    # perform eigval dec of XgSigma_invXg
+    my_eigh(XgSigma_invXg, L_const_eigvals, n_orient, L_const_WORK)
+    return L_const_eigvals[n_orient - 1]
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef BST(double * x, int x_len, double tau, double * zeros_like_x, int n_orient):
     """
     Block soft-thresholding of vector x at level tau, performed inplace.
-    Math formula: BST(x, tau) = x * max(0., 1 - tau/||x||_2)
+    Math formula: BST(x, tau) = x * max(0., 1 - tau/||x||_F)
+
+    Parameters:
+    -----------
+        x : ndarray, shape (n_orient, x_len)
     """
     cdef int inc = 1
-    cdef double x_norm = dnrm2(&x_len, x, &inc)
+    cdef int tmpint = n_orient * x_len
+    cdef double x_norm = dnrm2(&tmpint, x, &inc)
     if x_norm == 0.:
         # fill x with 0 with BLAS routine rather than for loop:
-        dcopy(&x_len, &zeros_like_x[0], &inc, x, &inc)
+        dcopy(&tmpint, zeros_like_x, &inc, x, &inc)
         return
 
     cdef double shrink = 1. - tau / x_norm
     if shrink <= 0.:
-        dcopy(&x_len, &zeros_like_x[0], &inc, x, &inc)
+        dcopy(&tmpint, zeros_like_x, &inc, x, &inc)
     else:
-        dscal(&x_len, &shrink, x, &inc)
-
+        dscal(&tmpint, &shrink, x, &inc)
+    # np.testing.assert_allclose()
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
 cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double alpha,
                             double[:, ::1] Beta_init, double tol=1e-4,
                             long max_iter=10**5, int f_Sigma_update=10,
-                            double sigma_min=1e-3, verbose=1):
+                            double sigma_min=1e-3, int verbose=1, int n_orient=1):
     """Solve the optimization problem of the multi-task Generalized Smoothed
     Concomitant Lasso with alternate minimization.
     We minimise in Beta and Sigma:
@@ -83,7 +145,9 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
             Lower constraint on the eigenvalues of Sigma.
         verbose : {0, 1}
             Level of verbosity.
-
+        n_orient : {1, 3}
+            Use only 1 except when dealing with MEEG, in which case 1 is fixed
+            orientation as 3 is free orientation.
     Returns:
     --------
         Beta : ndarray, shape (n_features, n_tasks)
@@ -93,12 +157,14 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
     """
     cdef int n_samples = X.shape[0]
     cdef int n_features = X.shape[1]
+    cdef int n_groups = n_features / n_orient
     cdef int n_tasks = Y.shape[1]
     cdef double inv_n_tasks = 1. / n_tasks
 
     cdef int it
     cdef int i
     cdef int j
+    cdef int g  # groups. If n_orient = 1, groups are single features
     cdef int inc = 1
     cdef double zero = 0.
     cdef double one = 1.  # to pass to cblas
@@ -119,7 +185,7 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
 
     # Lispchitz constants of features
     cdef double[:] L_const = np.empty(n_features)
-    cdef double[:] zeros_like_Beta_j = np.zeros(n_tasks)
+    cdef double[:, ::1] zeros_like_Beta_g = np.zeros([n_orient, n_tasks])
     # TODO monitor Energies as list
     cdef double[::1, :] R = np.empty([n_samples, n_tasks], order='F')
     cdef double[::1, :] ZZtop = np.empty([n_samples, n_samples], order='F')
@@ -158,7 +224,6 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
                     if Beta[j, t] != 0.:
                         dger(&n_samples, &n_tasks, &minus_one, &X[0, j], &inc,
                             &Beta[j, 0], &inc, &R[0, 0], &n_samples)
-                        print(j)
                         break
 
             # R_test = np.asfortranarray(Y - np.dot(X, Beta))
@@ -289,7 +354,8 @@ cpdef multitask_generalized_solver(double[::1, :] X, double[::1, :] Y, double al
             tmpdouble = alpha * n_samples * n_tasks / L_const[j]
 
             # in place soft thresholding:
-            BST(&Beta[j, 0], n_tasks, tmpdouble, zeros_like_Beta_j)
+            BST(&Beta[j, 0], n_tasks, tmpdouble, &zeros_like_Beta_g[0, 0],
+                n_orient)
 
             # WARNING this is probably error prone
             for t in range(n_tasks):
@@ -314,7 +380,8 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                             double tol=1e-4,
                             long max_iter=10**5,
                             int f_Sigma_update=10,
-                            double sigma_min=1e-3, verbose=1):
+                            double sigma_min=1e-3, verbose=1,
+                            int n_orient=1):
     """Solve the optimization problem of the multi-task BLock Homoscedastic
     Smoothed Concomitant Lasso with alternate minimization.
     We minimise in Beta and Sigma:
@@ -347,6 +414,9 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             Lower constraint on the noise levels per block.
         verbose : {0, 1}
             Level of verbosity.
+        n_orient : {1, 3}
+            Use 1 except when dealing with M/EEG applications, in which case
+            1 is for fixed orientation and 3 for free orientation.
 
     Returns:
     --------
@@ -358,6 +428,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
     cdef int n_samples = X.shape[0]
     cdef int n_features = X.shape[1]
     cdef int n_tasks = Y.shape[1]
+    cdef int n_groups = n_features // n_orient
     cdef int n_blocks = block_indices.shape[0] - 1
     cdef int[:] block_sizes = np.diff(block_indices)
 
@@ -368,6 +439,8 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
     cdef int k  # blocks
     cdef int i  # samples
     cdef int j  # features
+    cdef int g  # groups of features. if n_orient == 1, g and j are the same.
+    cdef int o  # orientations
     cdef int t  # tasks
     cdef int inc = 1
     cdef double zero = 0.
@@ -379,8 +452,9 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
     cdef double[:] norms_Theta_block = np.empty(n_blocks) # norm of block of Theta
 
 
-    cdef double[:] L_const = np.empty(n_features)
-    cdef double[:] zeros_like_Beta_j = np.zeros(n_tasks)
+    cdef double[:] L_const = np.empty(n_groups)
+    # cdef double[:] L_const_test = L_const.copy()
+    cdef double[:, ::1] zeros_like_Beta_g = np.zeros([n_orient, n_tasks])
     # TODO E D as lists ?
     cdef double[::1, :] R = np.empty([n_samples, n_tasks], order='F')
 
@@ -391,8 +465,12 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
     cdef double[::1, :] Sigma_inv_X = np.empty([n_samples, n_features], order='F')
     cdef double[::1, :] Sigma_inv_R = np.empty([n_samples, n_tasks], order='F')
     cdef double[::1, :] Theta = np.zeros([n_samples, n_tasks], order='F')
-    cdef double [:] XjTheta = np.zeros(n_tasks)
+    cdef double[:, ::1] XgTheta = np.zeros([n_orient, n_tasks])
 
+    # to compute spectral norms when n_orient != 1:
+    cdef double[::1, :] XjSigma_invXj = np.zeros([n_orient, n_orient], order='F')
+    cdef double[:] L_const_eigvals = np.zeros(n_orient)
+    cdef double[:] L_const_WORK  = np.empty(3 * n_orient - 1)
 
     cdef double p_obj
     cdef double d_obj
@@ -433,10 +511,9 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                 sigmas_inv[k] = 1. / sigmas[k]
 
             # compute Sigma_inv * X
-            # and Sigma_inv R
             tmpint = n_samples * n_features
             dcopy(&tmpint, &X[0, 0], &inc, &Sigma_inv_X[0, 0], &inc)
-            # cannot operate directly on lines of X and R because they're fortran
+            # cannot operate directly on lines of X and R because they're Fortran
             for j in range(n_features):
                 for k in range(n_blocks):
                     dscal(&block_sizes[k], &sigmas_inv[k],
@@ -445,7 +522,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             # np.testing.assert_allclose(np.array(Sigma_inv_X),
             #                            np.dot(np.diag(np.repeat(sigmas_inv, block_sizes)), X), err_msg="Sigma inv X")
 
-
+            # compute Sigma_inv * R
             tmpint = n_samples * n_tasks
             dcopy(&tmpint, &R[0, 0], &inc, &Sigma_inv_R[0, 0], &inc)
             for t in range(n_tasks):
@@ -457,9 +534,21 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             #                            np.dot(np.diag(np.repeat(sigmas_inv, block_sizes)), R), err_msg="Sigma inv R")
 
 
-            for j in range(n_features):
-                L_const[j] = ddot(&n_samples, &X[0, j], &inc,
-                                  &Sigma_inv_X[0, j], &inc)
+            for g in range(n_groups):
+                if n_orient == 1:
+                    L_const[g] = ddot(&n_samples, &X[0, g], &inc,
+                                      &Sigma_inv_X[0, g], &inc)
+                else:
+                    L_const[g] = spectral_norm_group(X, Sigma_inv_X, g * n_orient,
+                                               XjSigma_invXj, L_const_eigvals,
+                                               L_const_WORK, n_orient)
+            #
+            # for g in range(n_groups):
+            #     group = slice(g * n_orient, (g + 1) * n_orient)
+            #     L_const_test[g] = np.linalg.norm(np.dot(np.array(X).T[group], np.array(Sigma_inv_X)[:, group]), ord=2)
+
+            # np.testing.assert_allclose(np.array(L_const_test), np.array(L_const))
+
 
             # print(np.array(L_const))
             # np.testing.assert_allclose(np.array(L_const),
@@ -471,9 +560,9 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             for k in range(n_blocks):
                 p_obj += block_sizes[k] * sigmas[k] / (2 * n_samples)
 
-            for j in range(n_features):
-                p_obj += dnrm2(&n_tasks, &Beta[j, 0], &inc) * alpha
-
+            tmpint = n_tasks * n_orient
+            for g in range(n_groups):
+                p_obj += dnrm2(&tmpint, &Beta[g * n_orient, 0], &inc) * alpha
 
             tmpint = n_samples * n_tasks
 
@@ -483,12 +572,16 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             dscal(&tmpint, &tmpdouble, &Theta[0, 0], &inc)
 
             dual_norm_XtTheta = 0.
-            for j in range(n_features):
+            tmpint = n_tasks * n_orient  # number of elements in XgTheta
+            for g in range(n_groups):
                 for t in range(n_tasks):
-                    XjTheta[t] = ddot(&n_samples, &X[0, j], &inc,
-                                      &Theta[0, t], &inc)
+                    for o in range(n_orient):
+                        XgTheta[o, t] = \
+                            ddot(&n_samples, &X[0, g * n_orient + o], &inc,
+                                 &Theta[0, t], &inc)
                 dual_norm_XtTheta = fmax(dual_norm_XtTheta,
-                    dnrm2(&n_tasks, &XjTheta[0], &inc))
+                                         dnrm2(&tmpint, &XgTheta[0, 0], &inc))
+
 
             for k in range(n_blocks):
                 norms_Theta_block[k] = 0.
@@ -501,11 +594,10 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                 norms_Theta_block[k] = sqrt(norms_Theta_block[k])
 
 
-
             # dual point will be Theta /scal
             scal = 0.
             for k in range(n_blocks):
-                scal = fmax(scal, fmax(1, norms_Theta_block[k] * np.sqrt(n_tasks) * n_samples * alpha) / sqrt(block_sizes[k]))
+                scal = fmax(scal, fmax(1, norms_Theta_block[k] * sqrt(n_tasks) * n_samples * alpha) / sqrt(block_sizes[k]))
 
             scal = fmax(dual_norm_XtTheta, scal)
 
@@ -516,7 +608,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
 
             d_obj = alpha * ddot(&tmpint, &Y[0, 0], &inc, &Theta[0, 0], &inc)
             for k in range(n_blocks):
-                d_obj += sigma_min * (block_sizes[k] - (n_samples * np.sqrt(n_tasks) *
+                d_obj += sigma_min * (block_sizes[k] - (n_samples * sqrt(n_tasks) *
                          alpha * norms_Theta_block[k]) ** 2) / (2 * n_samples)
 
 
@@ -533,30 +625,43 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             # np.testing.assert_allclose(np.array(Sigma_inv_R),
             #     np.dot(Sigma_inv, Y - np.dot(X, Beta)))
 
-        for j in range(n_features):
+        for g in range(n_groups):
             # WARNING this is probably error prone
-            for t in range(n_tasks):
-                if Beta[j, t] != 0.:
-                    dger(&n_samples, &n_tasks, &one, &Sigma_inv_X[0, j],
-                         &inc, &Beta[j, 0], &inc, &Sigma_inv_R[0, 0],
-                         &n_samples)
-                    break
-            for t in range(n_tasks):
-                Beta[j, t] = ddot(&n_samples, &X[0, j], &inc,
-                                  &Sigma_inv_R[0, t], &inc) / L_const[j]
+            for o in range(n_orient):
+                for t in range(n_tasks):
+                    if Beta[g * n_orient + o, t] != 0.:
+                        dger(&n_samples, &n_tasks, &one, &Sigma_inv_X[0, g * n_orient + o],
+                             &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
+                             &n_samples)
+                        break
+
+            for o in range(n_orient):
+                for t in range(n_tasks):
+                    Beta[g *n_orient + o, t] = ddot(&n_samples, &X[0, g * n_orient + o], &inc,
+                                      &Sigma_inv_R[0, t], &inc) / L_const[g]
 
 
             # in place soft thresholding
-            tmpdouble = alpha * n_samples * n_tasks / L_const[j]
-            BST(&Beta[j, 0], n_tasks, tmpdouble, zeros_like_Beta_j)
+            tmpdouble = alpha * n_samples * n_tasks / L_const[g]
+            # test = np.array(Beta)[g * n_orient:(g+1)*n_orient].copy()
+            BST(&Beta[g * n_orient, 0], n_tasks, tmpdouble, &zeros_like_Beta_g[0, 0],
+                n_orient)
+
+            # np.testing.assert_allclose(
+            #     max(0, 1 - tmpdouble / np.linalg.norm(test, ord='fro')) * test,
+            #     np.array(np.array(Beta)[g * n_orient: (g+1) * n_orient]))
 
             # WARNING this is probably error prone
-            for t in range(n_tasks):
-                if Beta[j, t] != 0.:
-                    dger(&n_samples, &n_tasks, &minus_one,
-                         &Sigma_inv_X[0, j],
-                         &inc, &Beta[j, 0], &inc, &Sigma_inv_R[0, 0],
-                         &n_samples)
-                    break
+            for o in range(n_orient):
+                for t in range(n_tasks):
+                    if Beta[g * n_orient + o, t] != 0.:
+                        dger(&n_samples, &n_tasks, &minus_one,
+                             &Sigma_inv_X[0, g * n_orient + o],
+                             &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
+                             &n_samples)
+                        break
+            # np.testing.assert_allclose(np.array(Sigma_inv_R),
+            #                           np.repeat(np.array(sigmas_inv), block_sizes)[:, None] *
+            #                           Y - np.dot(Sigma_inv_X, Beta))
 
     return np.array(Beta), np.array(sigmas_inv)
