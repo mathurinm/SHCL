@@ -1,6 +1,7 @@
 import numpy as np
 cimport numpy as np
-from scipy.linalg.cython_blas cimport ddot, dcopy, dscal, dgemm, dger, dnrm2, dasum
+from scipy.linalg.cython_blas cimport (ddot, dcopy, dscal, dgemm, dger, dnrm2,
+                                       dasum, daxpy)
 from scipy.linalg.cython_lapack cimport dsyev
 cimport cython
 from libc.math cimport sqrt
@@ -88,7 +89,8 @@ cdef double spectral_norm_group(double[::1, :] X, double[::1, :] Sigma_inv_X,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef BST(double * x, int x_len, double tau, double * zeros_like_x, int n_orient):
+cdef BST(double * x, int x_len, double tau, double * zeros_like_x,
+         int n_orient):
     """
     Block soft-thresholding of vector x at level tau, performed inplace.
     Math formula: BST(x, tau) = x * max(0., 1 - tau/||x||_F)
@@ -98,7 +100,7 @@ cdef BST(double * x, int x_len, double tau, double * zeros_like_x, int n_orient)
         x : ndarray, shape (n_orient, x_len)
     """
     cdef int inc = 1
-    cdef int tmpint = n_orient * x_len
+    cdef int tmpint = n_orient * x_len  # total number of elements in x
     cdef double x_norm = dnrm2(&tmpint, x, &inc)
     if x_norm == 0.:
         # fill x with 0 with BLAS routine rather than for loop:
@@ -453,7 +455,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
 
 
     cdef double[:] L_const = np.empty(n_groups)
-    # cdef double[:] L_const_test = L_const.copy()
+    cdef double[:] L_const_test = L_const.copy()
     cdef double[:, ::1] zeros_like_Beta_g = np.zeros([n_orient, n_tasks])
     # TODO E D as lists ?
     cdef double[::1, :] R = np.empty([n_samples, n_tasks], order='F')
@@ -466,6 +468,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
     cdef double[::1, :] Sigma_inv_R = np.empty([n_samples, n_tasks], order='F')
     cdef double[::1, :] Theta = np.zeros([n_samples, n_tasks], order='F')
     cdef double[:, ::1] XgTheta = np.zeros([n_orient, n_tasks])
+    cdef double[:, ::1] diff_Beta_g = np.zeros([n_orient, n_tasks])
 
     # to compute spectral norms when n_orient != 1:
     cdef double[::1, :] XjSigma_invXj = np.zeros([n_orient, n_orient], order='F')
@@ -502,10 +505,10 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                 for t in range(n_tasks):
                     sigmas[k] += dnrm2(&block_sizes[k], &R[block_indices[k], t],
                                        &inc) ** 2
-            for k in range(n_blocks):
+
+
                 sigmas[k] = sqrt(sigmas[k] / (n_tasks * block_sizes[k]))
 
-            for k in range(n_blocks):
                 if sigmas[k] < sigma_min:
                     sigmas[k] = sigma_min
                 sigmas_inv[k] = 1. / sigmas[k]
@@ -543,11 +546,11 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                                                XjSigma_invXj, L_const_eigvals,
                                                L_const_WORK, n_orient)
             #
-            # for g in range(n_groups):
-            #     group = slice(g * n_orient, (g + 1) * n_orient)
-            #     L_const_test[g] = np.linalg.norm(np.dot(np.array(X).T[group], np.array(Sigma_inv_X)[:, group]), ord=2)
+            for g in range(n_groups):
+                group = slice(g * n_orient, (g + 1) * n_orient)
+                L_const_test[g] = np.linalg.norm(np.dot(np.array(X).T[group], np.array(Sigma_inv_X)[:, group]), ord=2)
 
-            # np.testing.assert_allclose(np.array(L_const_test), np.array(L_const))
+            np.testing.assert_allclose(np.array(L_const_test), np.array(L_const))
 
 
             # print(np.array(L_const))
@@ -590,14 +593,15 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                     norms_Theta_block[k] += dnrm2(&block_sizes[k],
                                               &Theta[block_indices[k], t],
                                               &inc) ** 2
-            for k in range(n_blocks):
+
                 norms_Theta_block[k] = sqrt(norms_Theta_block[k])
 
 
             # dual point will be Theta /scal
             scal = 0.
             for k in range(n_blocks):
-                scal = fmax(scal, fmax(1, norms_Theta_block[k] * sqrt(n_tasks) * n_samples * alpha) / sqrt(block_sizes[k]))
+                scal = fmax(scal, fmax(1, norms_Theta_block[k] * \
+                    sqrt(n_tasks / block_sizes[k]) * n_samples * alpha))
 
             scal = fmax(dual_norm_XtTheta, scal)
 
@@ -625,41 +629,60 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
             # np.testing.assert_allclose(np.array(Sigma_inv_R),
             #     np.dot(Sigma_inv, Y - np.dot(X, Beta)))
 
+        tmpint = n_orient * n_tasks
         for g in range(n_groups):
-            # WARNING this is probably error prone
-            for o in range(n_orient):
-                for t in range(n_tasks):
-                    if Beta[g * n_orient + o, t] != 0.:
-                        dger(&n_samples, &n_tasks, &one, &Sigma_inv_X[0, g * n_orient + o],
-                             &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
-                             &n_samples)
-                        break
+            # WARNING this is probably error prone.
+            # Remove contribution of group g to Sigma_inv_R:
+            dcopy(&tmpint, &Beta[g * n_orient, 0], &inc,
+                  &diff_Beta_g[0, 0], &inc)
+
+            # for o in range(n_orient):
+            #     for t in range(n_tasks):
+            #         if Beta[g * n_orient + o, t] != 0.:
+            #             dger(&n_samples, &n_tasks, &one, &Sigma_inv_X[0, g * n_orient + o],
+            #                  &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
+            #                  &n_samples)
+            #             break
 
             for o in range(n_orient):
                 for t in range(n_tasks):
-                    Beta[g *n_orient + o, t] = ddot(&n_samples, &X[0, g * n_orient + o], &inc,
+                    Beta[g * n_orient + o, t] += ddot(&n_samples, &X[0, g * n_orient + o], &inc,
                                       &Sigma_inv_R[0, t], &inc) / L_const[g]
-
 
             # in place soft thresholding
             tmpdouble = alpha * n_samples * n_tasks / L_const[g]
             # test = np.array(Beta)[g * n_orient:(g+1)*n_orient].copy()
-            BST(&Beta[g * n_orient, 0], n_tasks, tmpdouble, &zeros_like_Beta_g[0, 0],
-                n_orient)
+            BST(&Beta[g * n_orient, 0], n_tasks, tmpdouble,
+                &zeros_like_Beta_g[0, 0], n_orient)
 
             # np.testing.assert_allclose(
             #     max(0, 1 - tmpdouble / np.linalg.norm(test, ord='fro')) * test,
             #     np.array(np.array(Beta)[g * n_orient: (g+1) * n_orient]))
 
-            # WARNING this is probably error prone
+            # diff_Beta_g -= new value of Beta g
+            daxpy(&tmpint, &minus_one, &Beta[g * n_orient, 0], &inc,
+                  &diff_Beta_g[0, 0], &inc)
+
+            # keep residuals up to date:
+            # (do it only if update is non-zero)
             for o in range(n_orient):
                 for t in range(n_tasks):
-                    if Beta[g * n_orient + o, t] != 0.:
-                        dger(&n_samples, &n_tasks, &minus_one,
+                    if diff_Beta_g[o, t] != 0.:
+                        dger(&n_samples, &n_tasks, &one,
                              &Sigma_inv_X[0, g * n_orient + o],
-                             &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
+                             &inc, &diff_Beta_g[o, 0], &inc, &Sigma_inv_R[0, 0],
                              &n_samples)
                         break
+
+            # WARNING this is probably error prone
+            # for o in range(n_orient):
+            #     for t in range(n_tasks):
+            #         if Beta[g * n_orient + o, t] != 0.:
+            #             dger(&n_samples, &n_tasks, &minus_one,
+            #                  &Sigma_inv_X[0, g * n_orient + o],
+            #                  &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
+            #                  &n_samples)
+            #             break
             # np.testing.assert_allclose(np.array(Sigma_inv_R),
             #                           np.repeat(np.array(sigmas_inv), block_sizes)[:, None] *
             #                           Y - np.dot(Sigma_inv_X, Beta))
