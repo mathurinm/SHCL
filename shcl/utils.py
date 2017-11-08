@@ -1,5 +1,7 @@
 import numpy as np
 from numpy.linalg import norm
+from scipy.linalg import toeplitz
+from sklearn.utils import check_random_state
 
 
 def mahalanobis_norm(A, S):
@@ -71,3 +73,40 @@ def TP_FP_FN(true_support, support_hat):
     FN = len(set(true_support) - set(support_hat))
 
     return TP, FP, FN
+
+
+def generate_data(n_samples, n_features, n_tasks, n_NNZ_groups,
+                  true_sigmas, block_sizes,
+                  rho=0.5, snr=2, random_state=24, n_orient=1):
+    """Generate Toeplitz correlated features with block homoscedastic noise
+    and given signal-to-noise ratio"""
+    if n_features % n_orient != 0:
+        raise ValueError("Incompatible n_features and n_orient")
+    n_groups = n_features // n_orient
+
+    rng = check_random_state(random_state)
+    vect = rho ** np.arange(n_features)
+    covar = toeplitz(vect, vect)
+    X = rng.multivariate_normal(np.zeros(n_features), covar, n_samples)
+
+    true_support = rng.choice(range(n_groups), n_NNZ_groups,
+                              replace=False)
+    if n_orient != 1:
+        true_support = (np.arange(n_orient)[:, None] +
+                        n_orient * true_support[None, :]).ravel()
+    print(true_support)
+
+    np.sort(true_support)
+    true_Beta = np.zeros([n_features, n_tasks])
+    true_Beta[true_support] = rng.randn(n_orient * n_NNZ_groups, n_tasks)
+    Y = np.dot(X, true_Beta)
+
+    Sigma = np.diag(np.repeat(true_sigmas, block_sizes))
+    noise = np.dot(Sigma, rng.randn(n_samples, n_tasks))
+    s = norm(Y) / (norm(noise) * snr)
+    noise *= s
+
+    Y += noise
+    Y = np.asfortranarray(Y)
+
+    return np.asfortranarray(X), true_Beta, Y

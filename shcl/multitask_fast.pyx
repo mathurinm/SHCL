@@ -506,7 +506,6 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                     sigmas[k] += dnrm2(&block_sizes[k], &R[block_indices[k], t],
                                        &inc) ** 2
 
-
                 sigmas[k] = sqrt(sigmas[k] / (n_tasks * block_sizes[k]))
 
                 if sigmas[k] < sigma_min:
@@ -610,6 +609,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                 tmpint = n_tasks * n_samples
                 dscal(&tmpint, &tmpdouble, &Theta[0, 0], &inc)
 
+            tmpint = n_tasks * n_samples
             d_obj = alpha * ddot(&tmpint, &Y[0, 0], &inc, &Theta[0, 0], &inc)
             for k in range(n_blocks):
                 d_obj += sigma_min * (block_sizes[k] - (n_samples * sqrt(n_tasks) *
@@ -631,18 +631,8 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
 
         tmpint = n_orient * n_tasks
         for g in range(n_groups):
-            # WARNING this is probably error prone.
-            # Remove contribution of group g to Sigma_inv_R:
             dcopy(&tmpint, &Beta[g * n_orient, 0], &inc,
                   &diff_Beta_g[0, 0], &inc)
-
-            # for o in range(n_orient):
-            #     for t in range(n_tasks):
-            #         if Beta[g * n_orient + o, t] != 0.:
-            #             dger(&n_samples, &n_tasks, &one, &Sigma_inv_X[0, g * n_orient + o],
-            #                  &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
-            #                  &n_samples)
-            #             break
 
             for o in range(n_orient):
                 for t in range(n_tasks):
@@ -651,7 +641,6 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
 
             # in place soft thresholding
             tmpdouble = alpha * n_samples * n_tasks / L_const[g]
-            # test = np.array(Beta)[g * n_orient:(g+1)*n_orient].copy()
             BST(&Beta[g * n_orient, 0], n_tasks, tmpdouble,
                 &zeros_like_Beta_g[0, 0], n_orient)
 
@@ -673,18 +662,5 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
                              &inc, &diff_Beta_g[o, 0], &inc, &Sigma_inv_R[0, 0],
                              &n_samples)
                         break
-
-            # WARNING this is probably error prone
-            # for o in range(n_orient):
-            #     for t in range(n_tasks):
-            #         if Beta[g * n_orient + o, t] != 0.:
-            #             dger(&n_samples, &n_tasks, &minus_one,
-            #                  &Sigma_inv_X[0, g * n_orient + o],
-            #                  &inc, &Beta[g * n_orient + o, 0], &inc, &Sigma_inv_R[0, 0],
-            #                  &n_samples)
-            #             break
-            # np.testing.assert_allclose(np.array(Sigma_inv_R),
-            #                           np.repeat(np.array(sigmas_inv), block_sizes)[:, None] *
-            #                           Y - np.dot(Sigma_inv_X, Beta))
 
     return np.array(Beta), np.array(sigmas_inv)
