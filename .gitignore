@@ -1,11 +1,13 @@
 # Cython compilation files
 *.o
 *.cpp
+*.c
 *.so
 shcl/__pycache__/*
-SHCL.egg-info
+SHCL.egg-info*
+*.html
 
 # Joblib
 examples/joblib_cache/*
-
+joblib_cache/*
 
