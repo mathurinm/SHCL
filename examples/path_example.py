@@ -19,6 +19,8 @@ def run_solver(X, Y, solver, alphas, ax1, color, marker, true_support):
     FPs = []
     FNs = []
 
+    f_Sigma_update = 2
+
     n_active = len(true_support)
     Beta = np.zeros([n_features, n_tasks])
 
@@ -30,7 +32,8 @@ def run_solver(X, Y, solver, alphas, ax1, color, marker, true_support):
             Beta, sigma_invs = memory.cache(multitask_blockhomo_solver)(
                 X, np.asfortranarray(Y), alpha, Beta, block_indices_conco,
                 tol=1e-4,
-                max_iter=20000, f_Sigma_update=100, sigma_min=sigma_min)
+                max_iter=20000, f_Sigma_update=f_Sigma_update,
+                sigma_min=sigma_min)
 
         elif solver == "SCL (Block 1)":
             X1 = X[block_indices[0]:block_indices[1], :].copy(order='F')
@@ -40,12 +43,14 @@ def run_solver(X, Y, solver, alphas, ax1, color, marker, true_support):
             Beta, sigma_invs = memory.cache(multitask_blockhomo_solver)(
                 X1, Y1, alpha, Beta, block_indices_conco1,
                 tol=1e-4,
-                max_iter=20000, f_Sigma_update=100, sigma_min=sigma_min)
+                max_iter=20000, f_Sigma_update=f_Sigma_update,
+                sigma_min=sigma_min)
 
         elif solver == "SBHCL":
             Beta, sigma_invs = memory.cache(multitask_blockhomo_solver)(
                 X, np.asfortranarray(Y), alpha, Beta, block_indices, tol=1e-4,
-                max_iter=20000, f_Sigma_update=100, sigma_min=sigma_min)
+                max_iter=20000, f_Sigma_update=f_Sigma_update,
+                sigma_min=sigma_min)
 
         elif solver == "MTL":
             max_iter = 20000
@@ -99,7 +104,6 @@ def run_solver(X, Y, solver, alphas, ax1, color, marker, true_support):
     ax1.legend(loc="lower right")
     ax1.grid('on')
 
-
     return TPs, FNs, FPs
 
 
@@ -118,7 +122,6 @@ def run(n_samples, n_features, n_tasks, n_active, snr, rho):
     true_support = np.where(true_Beta.any(axis=1))[0]
 
     sigma_min = 1e-3
-
     # "block homo"
     alpha_max = compute_alpha_max_blockhomo(X, Y, sigma_min, block_indices)
     n_alphas = 20

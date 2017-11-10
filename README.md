@@ -14,11 +14,11 @@ For optimal time performance, the algorithms are written in Cython, using calls 
 Clone the repository:
 
 ```
-$git clone git@github.com:mathurinm/SHCL.git
+$git clone https://github.com/mathurinm/SHCL.git
 $cd SHCL/
 $conda env create --file environment.yml
 $source activate shcl-env
-$pip install --no-deps -e .
+$pip install --no-deps -e .  # do not forget the . at the end
 ```
 
 # Examples
