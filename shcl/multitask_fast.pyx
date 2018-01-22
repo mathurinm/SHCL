@@ -692,7 +692,7 @@ cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y, double alph
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
-cpdef multitask_blockhomo_solver_clever(double[::1, :] X, double[::1, :] Y,
+cpdef multitask_blockhomo_solver(double[::1, :] X, double[::1, :] Y,
                             double alpha,
                             double[:, ::1] Beta_init,
                             int[:] block_indices,

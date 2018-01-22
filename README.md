@@ -38,4 +38,4 @@ Mathurin Massias, Olivier Fercoq, Alexandre Gramfort and Joseph Salmon
 
 Generalized Concomitant Multi-Task Lasso for sparse multimodal regression
 
-Arxiv preprint, 2017
+to appear in AISTATS 2018
